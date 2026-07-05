@@ -5,6 +5,7 @@ export default defineConfig({
   title: "Openmim",
   description: "An open-source AI bot development platform.",
   lang: 'zh-CN',
+  base: '/Openmim/',
   themeConfig: {
     logo: '/logo.png',
     // https://vitepress.dev/reference/default-theme-config
