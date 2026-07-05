@@ -1,0 +1,25 @@
+/project_config.json
+*.sqlite3
+*.sqlite3-*
+__pycache__/
+*.pyc
+.evolution_backups/
+context_history.json
+/privacy_consent.json
+/group_settings.json
+.encryption_key
+*.log
+/runtime_state.json
+/tmp/
+.venv/
+backups/
+*.tar.gz
+
+# 代码索引工具产物（codegraph）
+.codegraph/
+
+# Runtime data directory
+/data/*.sqlite3
+/data/*.sqlite3-*
+/data/*.json
+/data/*.bak_*

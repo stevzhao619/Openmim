@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Openmim Web Panel</title>
+<link rel="stylesheet" href="/static/app.css">
+<script>
+  // Apply theme before paint to avoid flash.
+  (function() {
+    var t = localStorage.getItem("openmim_theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
+</head>
+<body>
+<header class="topbar">
+  <h1>✨ Openmim Web Panel</h1>
+  <div class="auth-row">
+    <input id="token-input" type="password" placeholder="Access Token" autocomplete="off">
+    <button id="token-save" type="button">保存 Token</button>
+    <button class="theme-toggle" id="theme-toggle" type="button" title="切换主题"></button>
+    <span id="auth-status" class="muted"></span>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="dashboard" class="active">◈ 仪表盘</button>
+  <button data-tab="whitelist">○ 白名单</button>
+  <button data-tab="access">○ 访问列表</button>
+  <button data-tab="plugins">○ 插件</button>
+  <button data-tab="group-settings">○ 群设置</button>
+  <button data-tab="json">○ JSON 编辑器</button>
+  <button data-tab="skills">○ Skill 上传</button>
+  <button data-tab="diagnostics">○ 诊断</button>
+  <button data-tab="restart">○ 重启</button>
+</nav>
+
+<main id="content">
+  <section id="tab-dashboard" class="tab-panel active"></section>
+  <section id="tab-whitelist" class="tab-panel"></section>
+  <section id="tab-access" class="tab-panel"></section>
+  <section id="tab-plugins" class="tab-panel"></section>
+  <section id="tab-group-settings" class="tab-panel"></section>
+  <section id="tab-json" class="tab-panel"></section>
+  <section id="tab-skills" class="tab-panel"></section>
+  <section id="tab-diagnostics" class="tab-panel"></section>
+  <section id="tab-restart" class="tab-panel"></section>
+</main>
+
+<footer class="footer muted">Openmim Web Panel — 默认仅本机访问，请勿在生产环境暴露。</footer>
+
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
