@@ -12,9 +12,8 @@ from typing import Optional, AsyncGenerator
 
 import httpx
 
-from app.runtime_config import RuntimeConfig
+from app.runtime_config import RuntimeConfig, get_shared_runtime_config
 from app_config.customization import get_text
-from app_config.settings import load_settings
 from plugins.base import ToolContext
 from plugins.manager import get_plugin_manager
 from llm.prompt import (
@@ -49,7 +48,7 @@ from stores.token_usage_store import record_usage
 
 logger = logging.getLogger(__name__)
 
-_RUNTIME_CONFIG = RuntimeConfig(load_settings())
+_RUNTIME_CONFIG = get_shared_runtime_config()
 
 _DISABLE_REASONING = {"thinking": {"type": "disabled"}}
 
@@ -247,6 +246,72 @@ class LLMClient:
         current_reply_to_message_id: int | None = None,
         chat_title: str | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """Run one isolated chat request and own its request-local HTTP client."""
+        llm_cfg = self._get_effective_llm_config(chat_id)
+        default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
+        default_provider = normalize_provider(default_cfg.provider)
+        is_custom_api = (
+            llm_cfg["provider"] != default_provider
+            or llm_cfg["base_url"] != default_cfg.api_base
+            or llm_cfg["api_key"] != default_cfg.api_key
+        )
+        http_client = self._http
+        if is_custom_api:
+            http_client = httpx.AsyncClient(
+                base_url=llm_cfg["base_url"],
+                timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
+                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+                headers=provider_headers(llm_cfg["provider"], llm_cfg["api_key"]),
+            )
+
+        stream = self._chat_stream_impl(
+            context_mgr=context_mgr,
+            chat_id=chat_id,
+            current_message=current_message,
+            current_sender=current_sender,
+            is_reply=is_reply,
+            is_mention=is_mention,
+            image_base64=image_base64,
+            image_file_id=image_file_id,
+            telegram_context=telegram_context,
+            persona_users=persona_users,
+            trigger_type=trigger_type,
+            current_message_id=current_message_id,
+            current_reply_to_message_id=current_reply_to_message_id,
+            chat_title=chat_title,
+            _http_client=http_client,
+            _llm_cfg=llm_cfg,
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if http_client is not self._http:
+                    await http_client.aclose()
+
+    async def _chat_stream_impl(
+        self,
+        context_mgr: ContextManager,
+        chat_id: int,
+        current_message: str,
+        current_sender: str,
+        is_reply: bool = False,
+        is_mention: bool = False,
+        image_base64: str | None = None,
+        image_file_id: str | None = None,
+        telegram_context=None,
+        persona_users: list | None = None,
+        trigger_type: str = "",
+        current_message_id: int | None = None,
+        current_reply_to_message_id: int | None = None,
+        chat_title: str | None = None,
+        *,
+        _http_client: httpx.AsyncClient,
+        _llm_cfg: dict,
+    ) -> AsyncGenerator[StreamEvent, None]:
         messages = await self.build_messages(
             context_mgr, chat_id, current_message, current_sender,
             is_reply=is_reply,
@@ -261,7 +326,7 @@ class LLMClient:
         )
 
         # ── 群组有效配置 ──
-        llm_cfg = self._get_effective_llm_config(chat_id)
+        llm_cfg = _llm_cfg
         effective_provider = llm_cfg["provider"]
         effective_model = llm_cfg["model"]
         effective_base = llm_cfg["base_url"]
@@ -276,18 +341,7 @@ class LLMClient:
         # thinking 参数仅 DeepSeek 模型支持；非 deepseek 模型一律不发
         _skip_reasoning = effective_provider != OPENAI_COMPATIBLE or is_custom_api or ("deepseek" not in effective_model.lower())
 
-        http_client = self._http
-        if is_custom_api:
-            http_client = httpx.AsyncClient(
-                base_url=effective_base,
-                timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
-                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
-                headers=provider_headers(effective_provider, effective_key),
-            )
-
-        self._current_ref_image: str | None = image_base64
-        self._current_ref_file_id: str | None = image_file_id
-        self._telegram_context = telegram_context
+        http_client = _http_client
 
         prev_clean_text = ""
 
@@ -387,15 +441,10 @@ class LLMClient:
                 status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) and e.response is not None else "n/a"
                 logger.error(f"LLM error sanitized: status={status} type={type(e).__name__}")
                 yield StreamEvent(type="error", text=safe_msg)
-                # Cleanup temp client before returning
-                if http_client is not self._http:
-                    await http_client.aclose()
                 return
             except Exception as e:
                 logger.exception("LLM exception")
                 yield StreamEvent(type="error", text=get_text("llm.internal_error", "内部错误"))
-                if http_client is not self._http:
-                    await http_client.aclose()
                 return
 
             if finish_reason == "tool_calls" and tool_calls_buffer:
@@ -433,7 +482,14 @@ class LLMClient:
                         tool_call_id=buf["id"],
                         text=f"🔍 {buf['name']}...",
                     )
-                    tool_result = await self._execute_tool(buf["name"], buf["args_str"], chat_id=chat_id)
+                    tool_result = await self._execute_tool(
+                        buf["name"],
+                        buf["args_str"],
+                        chat_id=chat_id,
+                        telegram_context=telegram_context,
+                        reference_image_base64=image_base64,
+                        reference_file_id=image_file_id,
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": buf["id"],
@@ -460,22 +516,23 @@ class LLMClient:
                             tool_name=tool["name"],
                             text=f"🔍 {tool['name']}...",
                         )
-                        result = await self._execute_tool(tool["name"], tool["args_str"], chat_id=chat_id)
+                        result = await self._execute_tool(
+                            tool["name"],
+                            tool["args_str"],
+                            chat_id=chat_id,
+                            telegram_context=telegram_context,
+                            reference_image_base64=image_base64,
+                            reference_file_id=image_file_id,
+                        )
                         messages.append({
                             "role": "user",
                             "content": _wrap_tool_result(tool["name"], result),
                         })
                     continue
 
-            # Done - cleanup temp client
-            if http_client is not self._http:
-                await http_client.aclose()
             yield StreamEvent(type="done", text=content_buf)
             return
 
-        # Fallthrough - cleanup temp client
-        if http_client is not self._http:
-            await http_client.aclose()
         yield StreamEvent(type="done", text=content_buf)
 
     # ---- chat (non-streaming) ----
@@ -520,7 +577,16 @@ class LLMClient:
 
     # ---- execute tool ----
 
-    async def _execute_tool(self, name: str, args_str: str, chat_id: int | None = None) -> str:
+    async def _execute_tool(
+        self,
+        name: str,
+        args_str: str,
+        chat_id: int | None = None,
+        *,
+        telegram_context=None,
+        reference_image_base64: str | None = None,
+        reference_file_id: str | None = None,
+    ) -> str:
         try:
             args = json.loads(args_str) if args_str else {}
         except json.JSONDecodeError:
@@ -529,9 +595,11 @@ class LLMClient:
         ctx = ToolContext(
             chat_id=chat_id,
             llm_client=self,
-            telegram_context=getattr(self, "_telegram_context", None),
+            telegram_context=telegram_context,
             runtime_config=_RUNTIME_CONFIG,
         )
+        ctx.reference_image_base64 = reference_image_base64
+        ctx.reference_file_id = reference_file_id
         ctx.plugin_manager = get_plugin_manager()
         result = await ctx.plugin_manager.execute_tool(name, args, ctx)
         max_chars = _RUNTIME_CONFIG.tool_result_max_chars
@@ -872,40 +940,35 @@ class LLMClient:
         max_tokens: int = 300,
         temperature: float = 0.8,
     ) -> str:
-        from openai import AsyncOpenAI
-
-        import app_config.config as _cfg
-        gen_model = _cfg.IMAGE_GEN_MODEL
-        gen_api_key = _cfg.IMAGE_GEN_API_KEY
-        gen_api_base = _cfg.IMAGE_GEN_API_BASE
-        client = AsyncOpenAI(
-            api_key=gen_api_key,
-            base_url=gen_api_base,
-        )
-
+        llm_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
+        provider = normalize_provider(llm_cfg.provider)
         messages = [
             {"role": "user", "content": prompt},
         ]
-
-        # ── 非 DeepSeek 模型不注入禁用思考 header ──
-        _gen_is_custom = gen_api_base != "https://api.openai.com/v1" or ("deepseek" not in gen_model.lower())
+        skip_reasoning = (
+            provider != OPENAI_COMPATIBLE
+            or llm_cfg.api_base != "https://api.openai.com/v1"
+            or "deepseek" not in llm_cfg.model.lower()
+        )
 
         try:
-            resp = await client.chat.completions.create(
-                model=gen_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=_RUNTIME_CONFIG.llm_timeout,
-                **({} if _gen_is_custom else {"extra_body": _DISABLE_REASONING}),
+            resp = await self._http.post(
+                provider_endpoint(provider),
+                json=build_request(
+                    provider,
+                    model=llm_cfg.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stream=False,
+                    extra_body=None if skip_reasoning else _DISABLE_REASONING,
+                ),
             )
-            try:
-                payload = resp.model_dump() if hasattr(resp, "model_dump") else None
-            except Exception:
-                payload = None
-            _record_usage_if_present(gen_model, payload)
-            result = resp.choices[0].message.content or ""
-            return result.strip()
+            resp.raise_for_status()
+            data = resp.json()
+            normalized = parse_response(provider, data)
+            _record_usage_if_present(llm_cfg.model, normalized.usage_payload)
+            return normalized.text.strip()
         except Exception as e:
             logger.warning(f"generate_text 调用失败: {e}")
             raise

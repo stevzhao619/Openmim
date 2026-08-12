@@ -6,6 +6,8 @@
 import logging
 import asyncio
 import re
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Optional
 
 from telegram import Update, Message
@@ -75,10 +77,15 @@ _sticker_mgr: Optional[StickerManager] = None
 _whitelist: set = set()
 
 # concurrent_updates 开启后：不同聊天可并发，同一聊天必须串行，避免上下文/回复乱序。
-_chat_session_locks: dict[int, asyncio.Lock] = {}
+@dataclass
+class _ChatSessionLockEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+_chat_session_locks: dict[int, _ChatSessionLockEntry] = {}
 _bot_loop_cooldown_until: dict[int, float] = {}
 # message_id -> whether this bot message may be used as a bot-to-bot trigger source
-_bot_reply_eligibility: dict[int, bool] = {}
 
 _message_parser = MessageParser()
 _reaction_service = ReactionService(logger=logger)
@@ -129,7 +136,6 @@ _trigger_service = TriggerService(
 _micro_action_service = MicroActionService(
     logger=logger,
     get_context_mgr=lambda: _context_mgr,
-    bot_reply_eligibility=_bot_reply_eligibility,
 )
 _passive_message_service = PassiveMessageService(
     logger=logger,
@@ -158,12 +164,20 @@ async def _is_user_in_group(bot, chat_id: int, user_id: int) -> bool:
         # 查询失败时保守假设用户仍在群内，避免误触全回复行为
         return True
 
-def _get_chat_session_lock(chat_id: int) -> asyncio.Lock:
-    lock = _chat_session_locks.get(chat_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _chat_session_locks[chat_id] = lock
-    return lock
+@asynccontextmanager
+async def _chat_session(chat_id: int):
+    entry = _chat_session_locks.get(chat_id)
+    if entry is None:
+        entry = _ChatSessionLockEntry()
+        _chat_session_locks[chat_id] = entry
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _chat_session_locks.get(chat_id) is entry:
+            _chat_session_locks.pop(chat_id, None)
 
 
 async def locked_group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,8 +187,7 @@ async def locked_group_message_handler(update: Update, context: ContextTypes.DEF
     chat = update.effective_chat
     if not chat:
         return await group_message_handler(update, context)
-    lock = _get_chat_session_lock(chat.id)
-    async with lock:
+    async with _chat_session(chat.id):
         return await group_message_handler(update, context)
 
 
@@ -239,7 +252,6 @@ _reply_service = ReplyService(
     get_sticker_mgr=lambda: _sticker_mgr,
     extract_reaction_markers=_reaction_service.extract_markers,
     set_message_reaction_safe=_reaction_service.set_message_reaction_safe,
-    bot_reply_eligibility=_bot_reply_eligibility,
 )
 
 
@@ -253,7 +265,6 @@ _chat_orchestrator = ChatOrchestrator(
     sticker_suffix=STICKER_SUFFIX,
     game_marker_re=GAME_MARKER_RE,
     text_tool_marker_re=re.compile(r'\\[TOOL:\\w+\\].*?\\[/TOOL\\]|\\[TOOL_RESULT:\\w+\\].*?\\[/TOOL_RESULT\\]', re.DOTALL),
-    bot_reply_eligibility=_bot_reply_eligibility,
     mark_replied=mark_replied,
     get_edit_interval_seconds=get_edit_interval_seconds,
     extract_reaction_markers=_reaction_service.extract_markers,

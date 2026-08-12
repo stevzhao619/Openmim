@@ -21,8 +21,7 @@ from typing import Any
 
 import httpx
 
-from app.runtime_config import RuntimeConfig
-from app_config.settings import load_settings
+from app.runtime_config import get_shared_runtime_config
 from llm.provider_protocols import build_request, normalize_provider, parse_response, provider_endpoint, provider_headers
 from stores.memory_store import (
     add_memory,
@@ -49,7 +48,7 @@ from app_config.config import (
 )
 
 logger = logging.getLogger(__name__)
-_RUNTIME_CONFIG = RuntimeConfig(load_settings())
+_RUNTIME_CONFIG = get_shared_runtime_config()
 DB_PATH = PERSONA_MEMORY_DB_FILE if os.path.isabs(PERSONA_MEMORY_DB_FILE) else os.path.join(DATA_DIR, PERSONA_MEMORY_DB_FILE)
 
 SENSITIVE_PATTERNS = [
@@ -730,12 +729,17 @@ def _should_skip_update_text(text: str) -> bool:
     return False
 
 
-_update_locks: dict[int, float] = {}
+_update_locks: dict[tuple[int, int], float] = {}
 
 
 def _cooldown_ok(chat_id: int, user_id: int) -> bool:
     now_ts = datetime.now().timestamp()
-    key = int(user_id)
+    if len(_update_locks) > 1000:
+        cutoff = now_ts - max(1, PERSONA_MEMORY_UPDATE_INTERVAL_SECONDS)
+        for stale_key, last_seen in list(_update_locks.items()):
+            if last_seen < cutoff:
+                _update_locks.pop(stale_key, None)
+    key = (int(chat_id), int(user_id))
     last = _update_locks.get(key, 0)
     if now_ts - last < PERSONA_MEMORY_UPDATE_INTERVAL_SECONDS:
         return False

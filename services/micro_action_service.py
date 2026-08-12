@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -14,10 +13,9 @@ from features.micro_actions import (
 
 
 class MicroActionService:
-    def __init__(self, *, logger, get_context_mgr, bot_reply_eligibility: dict[int, bool]):
+    def __init__(self, *, logger, get_context_mgr):
         self._logger = logger
         self._get_context_mgr = get_context_mgr
-        self._bot_reply_eligibility = bot_reply_eligibility
 
     async def try_micro_action(self, msg, context, chat_id: int, text: str, bot_username: str):
         try:
@@ -45,7 +43,6 @@ class MicroActionService:
                     text=action_text,
                     disable_notification=True,
                 )
-                self._bot_reply_eligibility[sent.message_id] = False
                 context_mgr = self._get_context_mgr()
                 if context_mgr is not None:
                     cm = ContextMessage(
@@ -53,7 +50,7 @@ class MicroActionService:
                         text=action_text,
                         message_type="bot",
                     )
-                    asyncio.create_task(context_mgr.append(chat_id, cm))
+                    await context_mgr.append(chat_id, cm)
                 self._logger.info(f"🎭 微动作触发 | chat={chat_id} | text={action_text[:40]}")
         except Exception as e:
             self._logger.debug(f"微动作评估异常: {e}")

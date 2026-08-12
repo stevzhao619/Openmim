@@ -1000,7 +1000,19 @@ def _kickoff_prepare_next(chat_id: int | None = None):
         if item:
             _prepared_guess_item = item
             logger.info("🎮 已后台准备下一道生图猜图题")
-    _prepare_guess_task = asyncio.create_task(runner())
+    _prepare_guess_task = asyncio.create_task(runner(), name="prepare-history-guess")
+
+
+async def stop_prepare_guess_task() -> None:
+    global _prepare_guess_task
+    task = _prepare_guess_task
+    _prepare_guess_task = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 async def _generate_guess_item(chat_id: int | None = None) -> dict:

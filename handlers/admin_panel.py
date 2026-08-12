@@ -353,7 +353,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == CB_ACCESS_PANEL:
             await _cb_access_panel(query)
         elif data == CB_PLUGIN_RELOAD:
-            await _cb_plugin_reload(query)
+            await _cb_plugin_reload(query, context.application)
         elif data.startswith(CB_PLUGIN_TOGGLE + ":"):
             await _cb_plugin_toggle(query, data.split(":", 2)[2])
         elif data.startswith(CB_ACCESS_EDIT + ":"):
@@ -560,14 +560,23 @@ async def _cb_plugin_panel(query):
 
 async def _cb_plugin_toggle(query, plugin_name: str):
     manager = get_plugin_manager()
-    enabled = manager.toggle_plugin(plugin_name)
+    try:
+        enabled = manager.toggle_plugin(plugin_name)
+    except (RuntimeError, ValueError) as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
     await query.answer(f"{'✅ 已启用' if enabled else '❌ 已禁用'} {plugin_name}", show_alert=False)
     await _cb_plugin_panel(query)
 
 
-async def _cb_plugin_reload(query):
-    reload_plugin_manager()
-    await query.answer("♻️ 插件已热重载", show_alert=False)
+async def _cb_plugin_reload(query, application):
+    try:
+        await reload_plugin_manager(application)
+    except Exception as exc:
+        logger.exception("插件配置重载失败")
+        await query.answer(f"插件重载失败：{exc}", show_alert=True)
+        return
+    await query.answer("♻️ 插件配置与生命周期已重载", show_alert=False)
     await _cb_plugin_panel(query)
 
 

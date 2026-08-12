@@ -17,13 +17,12 @@ import json
 import os
 from threading import Lock
 
-from app.runtime_config import RuntimeConfig
-from app_config.settings import load_settings
+from app.runtime_config import get_shared_runtime_config
 from app_config.config import DATA_DIR, WORKSPACE_DIR
 
 SETTINGS_PATH = os.path.join(DATA_DIR, "business_user_settings.json")
 _lock = Lock()
-_RUNTIME_CONFIG = RuntimeConfig(load_settings())
+_RUNTIME_CONFIG = get_shared_runtime_config()
 
 
 def _load() -> dict:

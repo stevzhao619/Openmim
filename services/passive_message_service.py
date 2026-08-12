@@ -20,7 +20,7 @@ class PassiveMessageService:
         if not (is_private or (is_group and str(chat_id) in whitelist)):
             return
 
-        self._message_context_service.record_message(msg, bot_username, bot_id)
+        await self._message_context_service.record_message(msg, bot_username, bot_id)
 
         if self._micro_actions_enabled and is_group and text:
             await self._micro_action_service.try_micro_action(msg, context, chat_id, text, bot_username)

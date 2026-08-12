@@ -14,6 +14,9 @@ import logging
 import random
 import re
 import time
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Optional
 
 from app_config.customization import get_text
@@ -56,7 +59,15 @@ logger = logging.getLogger("BusinessBot")
 
 # ── 活跃的 business connection 缓存 ──
 # business_connection_id → owner_user_id
-_active_connections: dict[str, int] = {}
+_active_connections: OrderedDict[str, int] = OrderedDict()
+_MAX_ACTIVE_CONNECTION_CACHE = 1000
+
+
+def _cache_active_connection(connection_id: str, owner_id: int) -> None:
+    _active_connections[connection_id] = owner_id
+    _active_connections.move_to_end(connection_id)
+    if len(_active_connections) > _MAX_ACTIVE_CONNECTION_CACHE:
+        _active_connections.popitem(last=False)
 
 
 
@@ -110,15 +121,30 @@ def _is_valid_business_human_sender(msg: Message, owner_id: int) -> bool:
     return True
 
 # concurrent_updates 开启后，同一个 Business 私聊必须串行处理，避免连续消息回复乱序。
-_business_session_locks: dict[str, asyncio.Lock] = {}
+@dataclass
+class _BusinessSessionLockEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
-def _get_business_session_lock(key: str) -> asyncio.Lock:
-    lock = _business_session_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _business_session_locks[key] = lock
-    return lock
+_business_session_locks: dict[str, _BusinessSessionLockEntry] = {}
+
+
+@asynccontextmanager
+async def _business_session(key: str):
+    """Serialize one owner/peer conversation and retire unused keyed locks."""
+    entry = _business_session_locks.get(key)
+    if entry is None:
+        entry = _BusinessSessionLockEntry()
+        _business_session_locks[key] = entry
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _business_session_locks.get(key) is entry:
+            _business_session_locks.pop(key, None)
 
 # ── 用户名脱敏 ──
 def _anonymize(user_id: int, real_name: str) -> str:
@@ -175,7 +201,7 @@ async def on_business_connection(update: Update, context: ContextTypes.DEFAULT_T
     owner_name = _get_display_name(user)
 
     if is_enabled and can_reply:
-        _active_connections[conn_id] = owner_id
+        _cache_active_connection(conn_id, owner_id)
         logger.info(
             f"🏢 Business 已连接 | conn={conn_id[:16]}... | "
             f"owner={owner_name} (ID:{owner_id})"
@@ -211,6 +237,41 @@ async def on_business_connection(update: Update, context: ContextTypes.DEFAULT_T
 # ═══════════════════════════════════════════════════
 
 async def on_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resolve the conversation identity, then serialize its complete lifecycle."""
+    if not BUSINESS_ENABLED:
+        return
+    msg = update.business_message
+    if msg is None:
+        return
+    business_connection_id = msg.business_connection_id
+    if not business_connection_id:
+        logger.warning("business_message missing business_connection_id")
+        return
+
+    owner_id = _active_connections.get(business_connection_id)
+    if owner_id is None:
+        try:
+            business_conn = await context.bot.get_business_connection(business_connection_id)
+            if business_conn and business_conn.user:
+                owner_id = business_conn.user.id
+                _cache_active_connection(business_connection_id, owner_id)
+        except TelegramError as exc:
+            logger.warning("Business connection lookup failed | conn=%s | err=%s", business_connection_id[:16], exc)
+        except Exception as exc:
+            logger.warning("Business connection lookup error | conn=%s | err=%s", business_connection_id[:16], exc)
+    if owner_id is None:
+        logger.warning("Business msg owner unresolved | conn=%s", business_connection_id[:16])
+        return
+
+    from_user = msg.from_user
+    if not _is_valid_business_human_sender(msg, owner_id):
+        return
+    session_key = f"{owner_id}:{from_user.id}"
+    async with _business_session(session_key):
+        await _on_business_message_unlocked(update, context)
+
+
+async def _on_business_message_unlocked(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 business_message —— 终端用户发给业务账号的消息。"""
     if not BUSINESS_ENABLED:
         return
@@ -234,7 +295,7 @@ async def on_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             business_conn = await context.bot.get_business_connection(business_connection_id)
             if business_conn and business_conn.user:
                 owner_id = business_conn.user.id
-                _active_connections[business_connection_id] = owner_id
+                _cache_active_connection(business_connection_id, owner_id)
                 logger.info(
                     f"🏢 Business 连接已从 API 恢复 | conn={business_connection_id[:16]}... | "
                     f"owner={_get_display_name(business_conn.user)} (ID:{owner_id})"
@@ -332,7 +393,7 @@ async def on_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=text,
             message_type="text",
         )
-        asyncio.create_task(context_mgr.append(biz_chat_id, cm))
+        await context_mgr.append(biz_chat_id, cm)
 
     # 获取最近上下文
     context_lines = []
@@ -453,7 +514,7 @@ async def on_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 text=" ".join(reply_messages),
                 message_type="bot",
             )
-            asyncio.create_task(context_mgr.append(biz_chat_id, bot_cm))
+            await context_mgr.append(biz_chat_id, bot_cm)
     except TelegramError as e:
         logger.error(f"Business 发送回复失败: {e}")
 
