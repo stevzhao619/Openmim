@@ -21,6 +21,7 @@ from stores.group_settings_store import (
     get_group_llm_api_base,
     get_group_llm_api_key,
     get_group_llm_model,
+    get_group_llm_provider,
     get_group_persona_prompt,
     get_group_scoring_criteria,
     get_group_tavily_api_key,
@@ -31,6 +32,7 @@ from stores.model_store import get_active_model
 
 @dataclass(frozen=True)
 class EffectiveLLMConfig:
+    provider: str
     model: str
     api_key: str
     api_base: str
@@ -149,14 +151,18 @@ class RuntimeConfig:
 
     # ---- effective per-chat configs ----
     def get_effective_llm(self, chat_id: int | None = None) -> EffectiveLLMConfig:
+        provider = self.settings.llm.provider
         model = get_active_model() or self.settings.llm.model
         api_key = legacy_config.LLM_API_KEY
         api_base = self.settings.llm.api_base
 
         if chat_id is not None:
+            custom_provider = get_group_llm_provider(chat_id)
             custom_model = get_group_llm_model(chat_id)
             custom_key = get_group_llm_api_key(chat_id)
             custom_base = get_group_llm_api_base(chat_id)
+            if custom_provider:
+                provider = custom_provider
             if custom_model:
                 model = custom_model
             if custom_key:
@@ -165,7 +171,7 @@ class RuntimeConfig:
                 api_base = custom_base
 
 
-        return EffectiveLLMConfig(model=model, api_key=api_key, api_base=api_base)
+        return EffectiveLLMConfig(provider=provider, model=model, api_key=api_key, api_base=api_base)
 
     def get_effective_image_gen(self, chat_id: int | None = None) -> EffectiveImageGenConfig:
         model = legacy_config.IMAGE_GEN_MODEL

@@ -2,6 +2,7 @@
 Business Chatbot 用户设置持久化存储。
 
 每个用户（Telegram Business 账号所有者）通过私聊配置：
+  - llm_provider: 自定义 LLM API 协议
   - llm_api_key: 自定义 LLM API Key
   - llm_api_base: 自定义 LLM API Base URL
   - llm_model: 自定义 LLM 模型名
@@ -46,10 +47,11 @@ def _save(data: dict) -> None:
 class BusinessUserSettings:
     """单个用户的 Business 设置。"""
 
-    __slots__ = ("llm_api_key", "llm_api_base", "llm_model", "persona", "persona_file_name", "mode", "aphasia_enabled", "sticker_enabled", "multi_message_enabled")
+    __slots__ = ("llm_provider", "llm_api_key", "llm_api_base", "llm_model", "persona", "persona_file_name", "mode", "aphasia_enabled", "sticker_enabled", "multi_message_enabled")
 
     def __init__(
         self,
+        llm_provider: str = "",
         llm_api_key: str = "",
         llm_api_base: str = "",
         llm_model: str = "",
@@ -60,6 +62,7 @@ class BusinessUserSettings:
         sticker_enabled: str = "false",
         multi_message_enabled: str = "true",
     ):
+        self.llm_provider = llm_provider
         self.llm_api_key = llm_api_key
         self.llm_api_base = llm_api_base
         self.llm_model = llm_model
@@ -72,6 +75,7 @@ class BusinessUserSettings:
 
     def to_dict(self) -> dict:
         return {
+            "llm_provider": self.llm_provider,
             "llm_api_key": self.llm_api_key,
             "llm_api_base": self.llm_api_base,
             "llm_model": self.llm_model,
@@ -86,6 +90,7 @@ class BusinessUserSettings:
     @classmethod
     def from_dict(cls, d: dict) -> BusinessUserSettings:
         return cls(
+            llm_provider=d.get("llm_provider", ""),
             llm_api_key=d.get("llm_api_key", ""),
             llm_api_base=d.get("llm_api_base", ""),
             llm_model=d.get("llm_model", ""),
@@ -97,6 +102,9 @@ class BusinessUserSettings:
             multi_message_enabled=d.get("multi_message_enabled", "true"),
         )
 
+    def effective_provider(self) -> str:
+        return self.llm_provider if self.llm_provider else _RUNTIME_CONFIG.get_effective_llm(None).provider
+
     def effective_api_key(self) -> str:
         return self.llm_api_key if self.llm_api_key else _RUNTIME_CONFIG.get_effective_llm(None).api_key
 
@@ -107,7 +115,7 @@ class BusinessUserSettings:
         return self.llm_model if self.llm_model else _RUNTIME_CONFIG.get_effective_llm(None).model
 
     def has_custom_llm(self) -> bool:
-        return bool(self.llm_api_key or self.llm_api_base or self.llm_model)
+        return bool(self.llm_provider or self.llm_api_key or self.llm_api_base or self.llm_model)
 
     def has_custom_persona(self) -> bool:
         return bool(self.persona.strip())
@@ -136,6 +144,10 @@ def get_user_settings(user_id: str | int) -> BusinessUserSettings:
 
 def set_user_setting(user_id: str | int, key: str, value: str) -> None:
     uid = str(user_id)
+    if key == "llm_provider":
+        value = str(value).strip().lower()
+        if value not in {"openai_compatible", "openai_responses", "anthropic"}:
+            raise ValueError("invalid llm_provider")
     with _lock:
         all_data = _load()
         if uid not in all_data:

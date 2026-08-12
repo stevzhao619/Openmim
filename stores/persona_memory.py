@@ -21,6 +21,9 @@ from typing import Any
 
 import httpx
 
+from app.runtime_config import RuntimeConfig
+from app_config.settings import load_settings
+from llm.provider_protocols import build_request, normalize_provider, parse_response, provider_endpoint, provider_headers
 from stores.memory_store import (
     add_memory,
     list_memories,
@@ -31,9 +34,6 @@ from stores.orm import runtime_sql_connection
 from app_config.config import (
     DATA_DIR,
     WORKSPACE_DIR,
-    LLM_API_BASE,
-    LLM_API_KEY,
-    LLM_MODEL,
     LLM_TIMEOUT,
     PERSONA_MEMORY_DB_FILE,
     PERSONA_MEMORY_ENABLED,
@@ -49,6 +49,7 @@ from app_config.config import (
 )
 
 logger = logging.getLogger(__name__)
+_RUNTIME_CONFIG = RuntimeConfig(load_settings())
 DB_PATH = PERSONA_MEMORY_DB_FILE if os.path.isabs(PERSONA_MEMORY_DB_FILE) else os.path.join(DATA_DIR, PERSONA_MEMORY_DB_FILE)
 
 SENSITIVE_PATTERNS = [
@@ -800,23 +801,26 @@ Bot 本轮回复：
 """
 
     try:
+        llm_cfg = _RUNTIME_CONFIG.get_effective_llm(chat_id)
+        provider = normalize_provider(llm_cfg.provider)
         async with httpx.AsyncClient(
-            base_url=LLM_API_BASE,
+            base_url=llm_cfg.api_base,
             timeout=httpx.Timeout(min(LLM_TIMEOUT, 60)),
-            headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+            headers=provider_headers(provider, llm_cfg.api_key),
         ) as client:
             resp = await client.post(
-                "/chat/completions",
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 700,
-                    "stream": False,
-                },
+                provider_endpoint(provider),
+                json=build_request(
+                    provider,
+                    model=llm_cfg.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=700,
+                    stream=False,
+                ),
             )
             resp.raise_for_status()
-            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            content = parse_response(provider, resp.json()).text
     except Exception as e:
         logger.warning("人格记忆更新 LLM 调用失败: %s", e)
         return

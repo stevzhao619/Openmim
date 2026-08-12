@@ -24,6 +24,7 @@ class ContextSettings:
 
 @dataclass(frozen=True)
 class LLMSettings:
+    provider: str
     api_base: str
     model: str
     timeout: int
@@ -58,6 +59,7 @@ def load_settings() -> AppSettings:
             bot_context_max_chars=legacy_config.BOT_CONTEXT_MAX_CHARS,
         ),
         llm=LLMSettings(
+            provider=legacy_config.LLM_PROVIDER,
             api_base=legacy_config.LLM_API_BASE,
             model=legacy_config.LLM_MODEL,
             timeout=legacy_config.LLM_TIMEOUT,

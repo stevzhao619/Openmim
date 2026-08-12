@@ -361,6 +361,7 @@ async def on_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 api_key=settings.effective_api_key(),
                 api_base=settings.effective_api_base(),
                 model=settings.effective_model(),
+                provider=settings.effective_provider(),
             )
             result = await pipeline.process(text)
             reply_text = result.final_text

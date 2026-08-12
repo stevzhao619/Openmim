@@ -170,7 +170,7 @@ ADMIN_GROUP_SETTING_KEYS = [
     "persona_prompt",
     "morning_greeting_enabled", "evening_greeting_enabled", "idle_topic_enabled",
     "free_reply_mode", "reply_preference", "attention_mode", "message_drop_probability",
-    "llm_model", "llm_api_key", "llm_api_base",
+    "llm_provider", "llm_model", "llm_api_key", "llm_api_base",
     "image_gen_api_key", "image_gen_api_base", "image_gen_model", "tavily_api_key",
 ]
 MODEL_DEPENDS_ON = {"llm_model": "llm_api_key", "image_gen_model": "image_gen_api_key"}
@@ -789,6 +789,7 @@ async def _cb_group_setting_custom(query, context, chat_id: str, key: str):
         "image_gen_model": "例如：gpt-image-1",
         "tavily_api_key": "请输入 Tavily API Key（tvly-...）",
         "llm_model": "例如：gpt-4o-mini / gpt-4o",
+        "llm_provider": "openai_compatible / openai_responses / anthropic",
         "llm_api_key": "请输入 LLM API Key（sk-...）",
         "llm_api_base": "例如：https://api.openai.com/v1",
         "message_drop_probability": "请输入 0~1 的小数，例如：0、0.2、0.75",
@@ -831,6 +832,9 @@ async def admin_group_setting_text_input(update: Update, context: ContextTypes.D
         return
     if key in ADMIN_BOOLEAN_SETTING_KEYS or key == "attention_mode":
         await update.message.reply_text("这个设置请通过面板按钮切换，不需要手动输入。")
+        return
+    if key == "llm_provider" and text.strip().lower() not in {"openai_compatible", "openai_responses", "anthropic"}:
+        await update.message.reply_text("❌ 协议必须是 openai_compatible、openai_responses 或 anthropic。")
         return
     if key == "message_drop_probability":
         try:

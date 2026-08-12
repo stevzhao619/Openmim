@@ -27,6 +27,15 @@ from llm.prompt import (
     STICKER_PREFIX,
     STICKER_SUFFIX,
 )
+from llm.provider_protocols import (
+    OPENAI_COMPATIBLE,
+    ProviderStreamAccumulator,
+    build_request,
+    normalize_provider,
+    parse_response,
+    provider_endpoint,
+    provider_headers,
+)
 from stores.context_manager import ContextManager
 from stores.model_store import (
     get_active_model,
@@ -152,19 +161,17 @@ class LLMResponse:
 
 
 class LLMClient:
-    """OpenAI 兼容 LLM 客户端，支持流式 + function call"""
+    """多协议 LLM 客户端，支持流式输出与 function call。"""
 
     def __init__(self, available_emojis: list[str] | None = None):
         self._available_emojis = available_emojis or []
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
+        default_provider = normalize_provider(default_cfg.provider)
         self._http = httpx.AsyncClient(
             base_url=default_cfg.api_base,
             timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
-            headers={
-                "Authorization": f"Bearer {default_cfg.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=provider_headers(default_provider, default_cfg.api_key),
         )
 
     async def close(self):
@@ -173,9 +180,14 @@ class LLMClient:
     # ---- per-group effective config ----
 
     def _get_effective_llm_config(self, chat_id: int | None = None) -> dict:
-        """Return (model, api_key, base_url) effective for a chat."""
+        """Return the effective provider configuration for a chat."""
         cfg = _RUNTIME_CONFIG.get_effective_llm(chat_id)
-        return {"model": cfg.model, "api_key": cfg.api_key, "base_url": cfg.api_base}
+        return {
+            "provider": normalize_provider(cfg.provider),
+            "model": cfg.model,
+            "api_key": cfg.api_key,
+            "base_url": cfg.api_base,
+        }
 
     # ---- build messages ----
 
@@ -245,17 +257,24 @@ class LLMClient:
             trigger_type=trigger_type,
             current_message_id=current_message_id,
             current_reply_to_message_id=current_reply_to_message_id,
+            chat_title=chat_title,
         )
 
         # ── 群组有效配置 ──
         llm_cfg = self._get_effective_llm_config(chat_id)
+        effective_provider = llm_cfg["provider"]
         effective_model = llm_cfg["model"]
         effective_base = llm_cfg["base_url"]
         effective_key = llm_cfg["api_key"]
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
-        is_custom_api = effective_base != default_cfg.api_base or effective_key != default_cfg.api_key
+        default_provider = normalize_provider(default_cfg.provider)
+        is_custom_api = (
+            effective_provider != default_provider
+            or effective_base != default_cfg.api_base
+            or effective_key != default_cfg.api_key
+        )
         # thinking 参数仅 DeepSeek 模型支持；非 deepseek 模型一律不发
-        _skip_reasoning = is_custom_api or ("deepseek" not in effective_model.lower())
+        _skip_reasoning = effective_provider != OPENAI_COMPATIBLE or is_custom_api or ("deepseek" not in effective_model.lower())
 
         http_client = self._http
         if is_custom_api:
@@ -263,10 +282,7 @@ class LLMClient:
                 base_url=effective_base,
                 timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
                 limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
-                headers={
-                    "Authorization": f"Bearer {effective_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=provider_headers(effective_provider, effective_key),
             )
 
         self._current_ref_image: str | None = image_base64
@@ -282,20 +298,22 @@ class LLMClient:
             stream_usage_payload: dict | None = None
 
             try:
+                tools = get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120)
+                extra_body = None if _skip_reasoning else _DISABLE_REASONING
                 if _RUNTIME_CONFIG.stream_enabled:
+                    accumulator = ProviderStreamAccumulator(effective_provider)
                     async with http_client.stream(
-                        "POST", "/chat/completions",
-                        json={
-                            "model": effective_model,
-                            "messages": messages,
-                            "temperature": _RUNTIME_CONFIG.llm_temperature,
-                            "max_tokens": _RUNTIME_CONFIG.llm_max_tokens,
-                            "stream": True,
-                            "stream_options": {"include_usage": True},
-                            "tools": get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120),
-                            "tool_choice": "auto",
-                            **({} if _skip_reasoning else _DISABLE_REASONING),
-                        },
+                        "POST", provider_endpoint(effective_provider),
+                        json=build_request(
+                            effective_provider,
+                            model=effective_model,
+                            messages=messages,
+                            temperature=_RUNTIME_CONFIG.llm_temperature,
+                            max_tokens=_RUNTIME_CONFIG.llm_max_tokens,
+                            stream=True,
+                            tools=tools,
+                            extra_body=extra_body,
+                        ),
                     ) as resp:
                         resp.raise_for_status()
                         async for line in resp.aiter_lines():
@@ -309,55 +327,41 @@ class LLMClient:
                             except json.JSONDecodeError:
                                 continue
 
-                            if isinstance(chunk.get("usage"), dict):
-                                stream_usage_payload = chunk
-
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-                            finish_reason = choices[0].get("finish_reason", "") or finish_reason
-
-                            if "content" in delta and delta["content"]:
-                                content_buf += delta["content"]
-                                yield StreamEvent(type="text_chunk", text=delta["content"])
-
-                            if "tool_calls" in delta:
-                                for tc in delta["tool_calls"]:
-                                    idx = tc.get("index", 0)
-                                    if idx not in tool_calls_buffer:
-                                        tool_calls_buffer[idx] = {"id": "", "name": "", "args_str": ""}
-                                    buf = tool_calls_buffer[idx]
-                                    if "id" in tc and tc["id"]:
-                                        buf["id"] = tc["id"]
-                                    if "function" in tc:
-                                        if "name" in tc["function"] and tc["function"]["name"]:
-                                            buf["name"] = tc["function"]["name"]
-                                        if "arguments" in tc["function"]:
-                                            buf["args_str"] += tc["function"]["arguments"]
+                            for text_delta in accumulator.feed(chunk):
+                                content_buf += text_delta
+                                yield StreamEvent(type="text_chunk", text=text_delta)
+                    normalized = accumulator.result()
+                    finish_reason = normalized.finish_reason
+                    stream_usage_payload = normalized.usage_payload
+                    for i, tc in enumerate(normalized.tool_calls):
+                        function = tc.get("function") or {}
+                        tool_calls_buffer[i] = {
+                            "id": tc.get("id", ""),
+                            "name": function.get("name", ""),
+                            "args_str": function.get("arguments", "{}"),
+                        }
                     _record_usage_if_present(effective_model, stream_usage_payload)
                 else:
                     resp = await http_client.post(
-                        "/chat/completions",
-                        json={
-                            "model": effective_model,
-                            "messages": messages,
-                            "temperature": _RUNTIME_CONFIG.llm_temperature,
-                            "max_tokens": _RUNTIME_CONFIG.llm_max_tokens,
-                            "stream": False,
-                            "tools": get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120),
-                            "tool_choice": "auto",
-                            **({} if _skip_reasoning else _DISABLE_REASONING),
-                        },
+                        provider_endpoint(effective_provider),
+                        json=build_request(
+                            effective_provider,
+                            model=effective_model,
+                            messages=messages,
+                            temperature=_RUNTIME_CONFIG.llm_temperature,
+                            max_tokens=_RUNTIME_CONFIG.llm_max_tokens,
+                            stream=False,
+                            tools=tools,
+                            extra_body=extra_body,
+                        ),
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    _record_usage_if_present(effective_model, data)
-                    choice = data.get("choices", [{}])[0]
-                    message = choice.get("message", {})
-                    content = message.get("content", "") or ""
+                    normalized = parse_response(effective_provider, data)
+                    _record_usage_if_present(effective_model, normalized.usage_payload)
+                    content = normalized.text
                     content_buf = content
-                    finish_reason = choice.get("finish_reason", "stop")
+                    finish_reason = normalized.finish_reason
                     has_text_tools = _RUNTIME_CONFIG.text_tool_enabled and _parse_text_tool_calls(content)
                     if content and not has_text_tools:
                         text_to_yield = content
@@ -371,8 +375,8 @@ class LLMClient:
                         if clean:
                             yield StreamEvent(type="text_chunk", text=clean)
                             prev_clean_text = clean
-                    if message.get("tool_calls"):
-                        for i, tc in enumerate(message["tool_calls"]):
+                    if normalized.tool_calls:
+                        for i, tc in enumerate(normalized.tool_calls):
                             tool_calls_buffer[i] = {
                                 "id": tc.get("id", ""),
                                 "name": tc.get("function", {}).get("name", ""),
@@ -417,6 +421,8 @@ class LLMClient:
                         for buf in tool_calls_buffer.values()
                     ],
                 }
+                if normalized.provider_output:
+                    assistant_msg["_provider_output"] = normalized.provider_output
                 messages.append(assistant_msg)
 
                 for buf in tool_calls_buffer.values():
@@ -441,10 +447,13 @@ class LLMClient:
                     clean = _clean_tool_text(content_buf)
                     # 不发送 tool_calls（原生 function call 已禁用），纯文本追加
                     if clean:
-                        messages.append({
+                        assistant_text_msg = {
                             "role": "assistant",
                             "content": clean,
-                        })
+                        }
+                        if normalized.provider_output:
+                            assistant_text_msg["_provider_output"] = normalized.provider_output
+                        messages.append(assistant_text_msg)
                     for i, tool in enumerate(text_tools):
                         yield StreamEvent(
                             type="tool_call",
@@ -484,6 +493,7 @@ class LLMClient:
         trigger_type: str = "",
         current_message_id: int | None = None,
         current_reply_to_message_id: int | None = None,
+        chat_title: str | None = None,
     ) -> LLMResponse:
         full_text = ""
         async for ev in self.chat_stream(
@@ -554,40 +564,45 @@ class LLMClient:
         )
 
         llm_cfg = self._get_effective_llm_config(chat_id)
+        effective_provider = llm_cfg["provider"]
         effective_model = llm_cfg["model"]
         effective_base = llm_cfg["base_url"]
         effective_key = llm_cfg["api_key"]
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
-        is_custom_api = effective_base != default_cfg.api_base or effective_key != default_cfg.api_key
-        _skip_reasoning = is_custom_api or ("deepseek" not in effective_model.lower())
+        default_provider = normalize_provider(default_cfg.provider)
+        is_custom_api = (
+            effective_provider != default_provider
+            or effective_base != default_cfg.api_base
+            or effective_key != default_cfg.api_key
+        )
+        _skip_reasoning = effective_provider != OPENAI_COMPATIBLE or is_custom_api or ("deepseek" not in effective_model.lower())
 
         http_client = self._http
         if is_custom_api:
             http_client = httpx.AsyncClient(
                 base_url=effective_base,
                 timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
-                headers={
-                    "Authorization": f"Bearer {effective_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=provider_headers(effective_provider, effective_key),
             )
 
         try:
             resp = await http_client.post(
-                "/chat/completions",
-                json={
-                    "model": effective_model,
-                    "messages": messages,
-                    "temperature": 0.3,
-                    "max_tokens": 10,
-                    "stream": False,
-                    **({} if _skip_reasoning else _DISABLE_REASONING),
-                },
+                provider_endpoint(effective_provider),
+                json=build_request(
+                    effective_provider,
+                    model=effective_model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=10,
+                    stream=False,
+                    extra_body=None if _skip_reasoning else _DISABLE_REASONING,
+                ),
             )
             resp.raise_for_status()
             data = resp.json()
-            _record_usage_if_present(effective_model, data)
-            content = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+            normalized = parse_response(effective_provider, data)
+            _record_usage_if_present(effective_model, normalized.usage_payload)
+            content = normalized.text.strip()
             from llm.focus_scoring import parse_focus_score
             return parse_focus_score(content)
         except Exception as e:
@@ -649,7 +664,8 @@ class LLMClient:
 
         # ── 非 DeepSeek 模型不注入禁用思考 header ──
         guest_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
-        _guest_skip_reasoning = guest_cfg.api_base != "https://api.openai.com/v1" or ("deepseek" not in guest_cfg.model.lower())
+        guest_provider = normalize_provider(guest_cfg.provider)
+        _guest_skip_reasoning = guest_provider != OPENAI_COMPATIBLE or guest_cfg.api_base != "https://api.openai.com/v1" or ("deepseek" not in guest_cfg.model.lower())
 
         for _round in range(max_rounds):
             try:
@@ -658,49 +674,41 @@ class LLMClient:
                         await progress_callback(get_text("llm.guest_thinking", "🔍 咱正在思考中…"))
                     except Exception:
                         pass
-                if enable_tools:
-                    resp = await self._http.post(
-                        "/chat/completions",
-                        json={
-                            "model": guest_cfg.model,
-                            "messages": messages,
-                            "temperature": 0.9,
-                            "max_tokens": min(_RUNTIME_CONFIG.llm_max_tokens, 800),
-                            "tools": get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120),
-                            "tool_choice": "auto",
-                            **({} if _guest_skip_reasoning else _DISABLE_REASONING),
-                        },
-                    )
-                else:
-                    resp = await self._http.post(
-                        "/chat/completions",
-                        json={
-                            "model": guest_cfg.model,
-                            "messages": messages,
-                            "temperature": 0.9,
-                            "max_tokens": min(_RUNTIME_CONFIG.llm_max_tokens, 512),
-                            **({} if _guest_skip_reasoning else _DISABLE_REASONING),
-                        },
-                    )
+                guest_tools = get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120) if enable_tools else []
+                resp = await self._http.post(
+                    provider_endpoint(guest_provider),
+                    json=build_request(
+                        guest_provider,
+                        model=guest_cfg.model,
+                        messages=messages,
+                        temperature=0.9,
+                        max_tokens=min(_RUNTIME_CONFIG.llm_max_tokens, 800 if enable_tools else 512),
+                        stream=False,
+                        tools=guest_tools,
+                        extra_body=None if _guest_skip_reasoning else _DISABLE_REASONING,
+                    ),
+                )
                 resp.raise_for_status()
                 data = resp.json()
-                choice = data.get("choices", [{}])[0]
-                message = choice.get("message", {})
-                content = (message.get("content", "") or "").strip()
-                finish_reason = choice.get("finish_reason", "stop")
+                normalized = parse_response(guest_provider, data)
+                _record_usage_if_present(guest_cfg.model, normalized.usage_payload)
+                content = normalized.text.strip()
+                finish_reason = normalized.finish_reason
 
                 if content:
                     clean = _clean_tool_text(content)
                     if clean:
                         final_text = clean
 
-                native_tools = message.get("tool_calls", [])
+                native_tools = normalized.tool_calls
                 if finish_reason == "tool_calls" and native_tools:
                     assistant_msg = {
                         "role": "assistant",
                         "content": content or None,
                         "tool_calls": native_tools,
                     }
+                    if normalized.provider_output:
+                        assistant_msg["_provider_output"] = normalized.provider_output
                     messages.append(assistant_msg)
                     for tc in native_tools:
                         t_name = tc.get("function", {}).get("name", "")
@@ -729,11 +737,14 @@ class LLMClient:
                                 "type": "function",
                                 "function": {"name": tool["name"], "arguments": tool["args_str"]},
                             })
-                        messages.append({
+                        assistant_text_msg = {
                             "role": "assistant",
                             "content": _clean_tool_text(content) or None,
                             "tool_calls": fake_tool_calls,
-                        })
+                        }
+                        if normalized.provider_output:
+                            assistant_text_msg["_provider_output"] = normalized.provider_output
+                        messages.append(assistant_text_msg)
                         for i, tool in enumerate(text_tools):
                             logger.info(f"👻 Guest text-tool: {tool['name']}")
                             if progress_callback:
@@ -793,16 +804,12 @@ class LLMClient:
         effective_base = settings.effective_api_base()
         effective_key = settings.effective_api_key()
         effective_model = settings.effective_model()
-
-        headers = {
-            "Authorization": f"Bearer {effective_key}",
-            "Content-Type": "application/json",
-        }
+        effective_provider = normalize_provider(settings.effective_provider())
 
         http_client = httpx.AsyncClient(
             base_url=effective_base,
             timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
-            headers=headers,
+            headers=provider_headers(effective_provider, effective_key),
         )
 
         try:
@@ -827,19 +834,21 @@ class LLMClient:
 
             # Business chatbot 永远不注入禁用思考 header
             resp = await http_client.post(
-                "/chat/completions",
-                json={
-                    "model": effective_model,
-                    "messages": messages,
-                    "temperature": _RUNTIME_CONFIG.llm_temperature,
-                    "max_tokens": _RUNTIME_CONFIG.llm_max_tokens,
-                    "stream": False,
-                },
+                provider_endpoint(effective_provider),
+                json=build_request(
+                    effective_provider,
+                    model=effective_model,
+                    messages=messages,
+                    temperature=_RUNTIME_CONFIG.llm_temperature,
+                    max_tokens=_RUNTIME_CONFIG.llm_max_tokens,
+                    stream=False,
+                ),
             )
             resp.raise_for_status()
             data = resp.json()
-            _record_usage_if_present(effective_model, data)
-            content = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+            normalized = parse_response(effective_provider, data)
+            _record_usage_if_present(effective_model, normalized.usage_payload)
+            content = normalized.text.strip()
 
             if len(content) > _RUNTIME_CONFIG.business_max_reply_chars:
                 content = content[:_RUNTIME_CONFIG.business_max_reply_chars] + "…"
