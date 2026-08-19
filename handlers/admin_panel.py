@@ -8,7 +8,7 @@ import json
 import os
 import re
 
-from app_config.customization import get_dict, get_text
+from app_config.customization import get_text
 import app_config.config as runtime_config
 import subprocess
 from typing import Optional
@@ -16,8 +16,7 @@ from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
-from telegram.error import TelegramError, BadRequest
-from telegram.helpers import escape_markdown
+from telegram.error import TelegramError
 
 from app_config.config import (
     ADMIN_IDS,
@@ -36,49 +35,21 @@ from stores.group_settings_store import (
     get_group_settings,
     set_group_setting,
     reset_group_setting,
-    get_setting_labels,
-    get_setting_descriptions,
     SETTING_IS_SENSITIVE,
     DEFAULT_GROUP_SETTINGS,
     mask_sensitive,
 )
-
-def _admin_examples() -> dict[str, str]:
-    return get_dict("admin_examples", {})
-
-
-def _labels() -> dict[str, str]:
-    return get_setting_labels()
-
-
-def _descriptions() -> dict[str, str]:
-    return get_setting_descriptions()
+from handlers.admin_panel_utils import (
+    admin_examples as _admin_examples,
+    labels as _labels,
+    descriptions as _descriptions,
+    mdv2 as _mdv2,
+    safe_edit as _safe_edit,
+)
 
 
 logger = logging.getLogger(__name__)
 
-
-def _mdv2(text: str) -> str:
-    """Convert the panel's small legacy-Markdown subset (**bold**, `code`) to MarkdownV2."""
-    s = str(text or "")
-    out: list[str] = []
-    i = 0
-    while i < len(s):
-        if s.startswith("**", i):
-            j = s.find("**", i + 2)
-            if j != -1:
-                out.append("*" + escape_markdown(s[i + 2:j], version=2) + "*")
-                i = j + 2
-                continue
-        if s[i] == "`":
-            j = s.find("`", i + 1)
-            if j != -1:
-                out.append("`" + escape_markdown(s[i + 1:j], version=2, entity_type="code") + "`")
-                i = j + 1
-                continue
-        out.append(escape_markdown(s[i], version=2))
-        i += 1
-    return "".join(out)
 
 _PENDING_STORE_KEY = "admin_pending_inputs"
 
@@ -104,26 +75,6 @@ def _clear_admin_pending(context: ContextTypes.DEFAULT_TYPE, user_id: int | str 
         return {}
     return _admin_pending_store(context).pop(str(user_id), {})
 
-
-# ── 安全编辑 ─────────────────────────────────────
-
-async def _safe_edit(query, text: str = None, reply_markup=None, parse_mode=None):
-    try:
-        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
-        msg = str(e).lower()
-        if "not modified" in msg:
-            return
-        # 群名/用户名/设置值可能含 Markdown 特殊字符；解析失败时降级纯文本，保证面板可用。
-        if parse_mode is not None and "can't parse entities" in msg:
-            try:
-                await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=None)
-                return
-            except TelegramError:
-                pass
-        raise
-    except TelegramError:
-        pass
 
 # ── Callback 常量 ─────────────────────────────────
 

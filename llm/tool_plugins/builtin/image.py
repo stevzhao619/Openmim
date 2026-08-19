@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from llm.tool_plugins.base import ToolContext, ToolPlugin
+from plugins.base import ToolContext, ToolSpec as ToolPlugin
 from integrations.image_gen_tool import IMAGE_GEN_TOOL_DEFINITION, execute_generate_image
 
 

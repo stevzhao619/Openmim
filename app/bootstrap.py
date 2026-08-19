@@ -39,16 +39,14 @@ from app.build_info import load_build_info
 
 from app.container import AppContext
 from app.runtime_config import get_shared_runtime_config
-from app_config.settings import load_settings
 from plugins.manager import load_plugins, set_plugin_manager
-from handlers.chat import init_handler as init_chat_handler, get_handler as get_chat_handler
-from handlers.admin import init_admin, get_handlers as get_admin_handlers
-from handlers.business import get_handlers as get_business_handlers
+from handlers.chat_handler import init_handler as init_chat_handler, get_handler as get_chat_handler
+from handlers.admin_handler import init_admin, get_handlers as get_admin_handlers
+from handlers.business_handler import get_handlers as get_business_handlers
 from handlers.private_text_router import get_handlers as get_private_text_router_handlers
 
 
 def build_runtime_context() -> AppContext:
-    settings = load_settings()
     runtime_config = get_shared_runtime_config()
 
     init_playables_db()
@@ -82,7 +80,6 @@ def build_runtime_context() -> AppContext:
     inject_whitelist_to_group_admin(whitelist)
 
     return AppContext(
-        settings=settings,
         runtime_config=runtime_config,
         context_mgr=context_mgr,
         sticker_mgr=sticker_mgr,
@@ -145,7 +142,7 @@ def register_handlers(application: Application) -> None:
     for h in get_topic_handlers():
         application.add_handler(h, group=0)
     # /fortune 仍是 core 可玩性命令；历史猜图已迁入 history_guess 插件。
-    from features.playables import get_handlers as get_fortune_handlers
+    from features.fortune import get_handlers as get_fortune_handlers
     for h in get_fortune_handlers():
         application.add_handler(h, group=0)
     # business handlers 内含 TypeHandler(Update)，匹配一切 update。

@@ -6,22 +6,16 @@ LLM 客户端
 """
 import json
 import logging
-import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, AsyncGenerator
 
 import httpx
 
-from app.runtime_config import RuntimeConfig, get_shared_runtime_config
+from app.runtime_config import get_shared_runtime_config
 from app_config.customization import get_text
 from plugins.base import ToolContext
 from plugins.manager import get_plugin_manager
 from llm.prompt import (
-    build_system_prompt,
-    build_stable_system_prompt,
-    build_stable_profile_prompt,
-    build_dynamic_hint_prompt,
-    format_context_message,
     MSG_SEPARATOR,
     STICKER_PREFIX,
     STICKER_SUFFIX,
@@ -36,14 +30,8 @@ from llm.provider_protocols import (
     provider_headers,
 )
 from stores.context_manager import ContextManager
-from stores.model_store import (
-    get_active_model,
-    set_active_model,
-)
+from stores.model_store import get_active_model
 from stores.focus_store import get_focus_store
-from stores.personality_state import get_personality
-from stores.conversation_memory import get_memory
-from stores.memory_store import list_memories
 from stores.token_usage_store import record_usage
 
 logger = logging.getLogger(__name__)
@@ -229,6 +217,15 @@ class LLMClient:
 
     # ---- chat_stream ----
 
+    @staticmethod
+    def _is_custom_api(provider: str, base_url: str, api_key: str, default_cfg, default_provider: str) -> bool:
+        """判断某聊天的 LLM 配置是否与全局默认不同（需要独立的 HTTP 客户端）。"""
+        return (
+            provider != default_provider
+            or base_url != default_cfg.api_base
+            or api_key != default_cfg.api_key
+        )
+
     async def chat_stream(
         self,
         context_mgr: ContextManager,
@@ -250,10 +247,8 @@ class LLMClient:
         llm_cfg = self._get_effective_llm_config(chat_id)
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
         default_provider = normalize_provider(default_cfg.provider)
-        is_custom_api = (
-            llm_cfg["provider"] != default_provider
-            or llm_cfg["base_url"] != default_cfg.api_base
-            or llm_cfg["api_key"] != default_cfg.api_key
+        is_custom_api = self._is_custom_api(
+            llm_cfg["provider"], llm_cfg["base_url"], llm_cfg["api_key"], default_cfg, default_provider
         )
         http_client = self._http
         if is_custom_api:
@@ -333,11 +328,7 @@ class LLMClient:
         effective_key = llm_cfg["api_key"]
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
         default_provider = normalize_provider(default_cfg.provider)
-        is_custom_api = (
-            effective_provider != default_provider
-            or effective_base != default_cfg.api_base
-            or effective_key != default_cfg.api_key
-        )
+        is_custom_api = self._is_custom_api(effective_provider, effective_base, effective_key, default_cfg, default_provider)
         # thinking 参数仅 DeepSeek 模型支持；非 deepseek 模型一律不发
         _skip_reasoning = effective_provider != OPENAI_COMPATIBLE or is_custom_api or ("deepseek" not in effective_model.lower())
 
@@ -638,11 +629,7 @@ class LLMClient:
         effective_key = llm_cfg["api_key"]
         default_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
         default_provider = normalize_provider(default_cfg.provider)
-        is_custom_api = (
-            effective_provider != default_provider
-            or effective_base != default_cfg.api_base
-            or effective_key != default_cfg.api_key
-        )
+        is_custom_api = self._is_custom_api(effective_provider, effective_base, effective_key, default_cfg, default_provider)
         _skip_reasoning = effective_provider != OPENAI_COMPATIBLE or is_custom_api or ("deepseek" not in effective_model.lower())
 
         http_client = self._http
@@ -691,246 +678,38 @@ class LLMClient:
         context_messages: list[str] | None = None,
         chat_id: int | str | None = None,
     ) -> str:
-        from datetime import datetime, timezone, timedelta
+        """Guest 模式非流式对话（实现已迁至 llm/guest_llm.py）。"""
+        from llm.guest_llm import guest_chat
+        return await guest_chat(
+            self,
+            query,
+            caller_name,
+            image_base64=image_base64,
+            progress_callback=progress_callback,
+            context_messages=context_messages,
+            chat_id=chat_id,
+        )
 
-        now = datetime.now(timezone(timedelta(hours=8)))
-        current_time = now.strftime("%Y-%m-%d %H:%M:%S CST (周%w)")
-
-        system = get_text(
-            "llm.guest_system_prompt",
-            "你是一个友好的 Telegram 猫娘助手，可以在任何聊天中被 @ 召唤回答问题。\n"
-            "说话风格：简洁、亲切、带一点点猫娘的口癖（如'喵~''唔'），但不要过度卖萌。\n"
-            "自称'咱'或'我'。不要提到自己是 AI 或模型。回答尽量在 3 句以内，直接给答案。\n\n"
-            "当前时间：{current_time}\n\n"
-            "你有工具可以调用：search_web（搜索）、fetch_url（读网页）。\n"
-            "调用方式：原生 function call，或文本格式 [TOOL:search_web] {{\"query\":\"...\"}} [/TOOL]\n"
-            "工具结果以 [TOOL_RESULT:工具名]...[/TOOL_RESULT] 返回，你根据结果继续回答。\n"
-            "需要实时信息时先搜索再回答，搜索后不要说'搜索显示'，自然融入。",
-        ).format(current_time=current_time)
-        user_text = get_text("llm.guest_user_template", "[来自 {caller_name}] {query}").format(caller_name=caller_name, query=query)
-        messages = [{"role": "system", "content": system}]
-        if context_messages:
-            context_block = get_text("llm.guest_context_prefix", "下面是这条 guest 提问直接相关的上下文，按从旧到新排列。请优先结合这些内容理解当前提问：\n{context}").format(context="\n".join(context_messages))
-            messages.append({"role": "user", "content": context_block})
-        if image_base64:
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_base64}",
-                        "detail": "auto",
-                    }},
-                ],
-            })
-        else:
-            messages.append({"role": "user", "content": user_text})
-
-        final_text = ""
-        max_rounds = _RUNTIME_CONFIG.agent_max_rounds if _RUNTIME_CONFIG.guest_tool_enabled else 1
-        enable_tools = _RUNTIME_CONFIG.guest_tool_enabled
-
-        # ── 非 DeepSeek 模型不注入禁用思考 header ──
-        guest_cfg = _RUNTIME_CONFIG.get_effective_llm(None)
-        guest_provider = normalize_provider(guest_cfg.provider)
-        _guest_skip_reasoning = guest_provider != OPENAI_COMPATIBLE or guest_cfg.api_base != "https://api.openai.com/v1" or ("deepseek" not in guest_cfg.model.lower())
-
-        for _round in range(max_rounds):
-            try:
-                if progress_callback:
-                    try:
-                        await progress_callback(get_text("llm.guest_thinking", "🔍 咱正在思考中…"))
-                    except Exception:
-                        pass
-                guest_tools = get_plugin_manager().tool_definitions(chat_id=chat_id, limit=120) if enable_tools else []
-                resp = await self._http.post(
-                    provider_endpoint(guest_provider),
-                    json=build_request(
-                        guest_provider,
-                        model=guest_cfg.model,
-                        messages=messages,
-                        temperature=0.9,
-                        max_tokens=min(_RUNTIME_CONFIG.llm_max_tokens, 800 if enable_tools else 512),
-                        stream=False,
-                        tools=guest_tools,
-                        extra_body=None if _guest_skip_reasoning else _DISABLE_REASONING,
-                    ),
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                normalized = parse_response(guest_provider, data)
-                _record_usage_if_present(guest_cfg.model, normalized.usage_payload)
-                content = normalized.text.strip()
-                finish_reason = normalized.finish_reason
-
-                if content:
-                    clean = _clean_tool_text(content)
-                    if clean:
-                        final_text = clean
-
-                native_tools = normalized.tool_calls
-                if finish_reason == "tool_calls" and native_tools:
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": content or None,
-                        "tool_calls": native_tools,
-                    }
-                    if normalized.provider_output:
-                        assistant_msg["_provider_output"] = normalized.provider_output
-                    messages.append(assistant_msg)
-                    for tc in native_tools:
-                        t_name = tc.get("function", {}).get("name", "")
-                        t_args = tc.get("function", {}).get("arguments", "{}")
-                        logger.info(f"👻 Guest tool: {t_name}({t_args[:80]})")
-                        if progress_callback:
-                            try:
-                                await progress_callback(get_text("llm.guest_calling_tool", "🛠️ 正在调用工具：{tool_name}…").format(tool_name=t_name))
-                            except Exception:
-                                pass
-                        result = await self._execute_tool(t_name, t_args, chat_id=chat_id)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", ""),
-                            "content": result,
-                        })
-                    continue
-
-                if _RUNTIME_CONFIG.text_tool_enabled and enable_tools:
-                    text_tools = _parse_text_tool_calls(content)
-                    if text_tools:
-                        fake_tool_calls = []
-                        for i, tool in enumerate(text_tools):
-                            fake_tool_calls.append({
-                                "id": f"guest_text_tool_{_round}_{i}",
-                                "type": "function",
-                                "function": {"name": tool["name"], "arguments": tool["args_str"]},
-                            })
-                        assistant_text_msg = {
-                            "role": "assistant",
-                            "content": _clean_tool_text(content) or None,
-                            "tool_calls": fake_tool_calls,
-                        }
-                        if normalized.provider_output:
-                            assistant_text_msg["_provider_output"] = normalized.provider_output
-                        messages.append(assistant_text_msg)
-                        for i, tool in enumerate(text_tools):
-                            logger.info(f"👻 Guest text-tool: {tool['name']}")
-                            if progress_callback:
-                                try:
-                                    await progress_callback(get_text("llm.guest_calling_tool", "🛠️ 正在调用工具：{tool_name}…").format(tool_name=tool["name"]))
-                                except Exception:
-                                    pass
-                            result = await self._execute_tool(tool["name"], tool["args_str"], chat_id=chat_id)
-                            messages.append({
-                                "role": "user",
-                                "content": _wrap_tool_result(tool["name"], result),
-                            })
-                        continue
-
-                break
-
-            except Exception as e:
-                em = _safe_http_error_message(e) if isinstance(e, httpx.HTTPError) else get_text("llm.generic_retry", "请稍后再试")
-                logger.error(f"Guest LLM 调用失败: {e}")
-                return get_text("llm.guest_error_with_detail", "唔…出了点问题喵（{error}）").format(error=em)
-
-        if progress_callback:
-            try:
-                await progress_callback(get_text("llm.guest_done", "✍️ 咱整理好回复啦…"))
-            except Exception:
-                pass
-
-        if len(final_text) > _RUNTIME_CONFIG.guest_mode_max_reply_chars:
-            final_text = final_text[:_RUNTIME_CONFIG.guest_mode_max_reply_chars] + "…"
-
-        return final_text or get_text("llm.guest_empty_reply", "唔…咱暂时想不出怎么回答喵")
 
     # ---- business_chat ----
-
     async def business_chat(
         self, owner_name: str, owner_id: str | int,
         other_name: str, message_text: str,
         context_messages: list[str] | None = None,
         control_hint: str = "",
     ) -> str:
-        """Business Chatbot 专用：简单非流式对话，无工具调用，per-user 自定义 LLM 配置。
-
-        Args:
-            owner_name: 业务账号所有者的脱敏名称
-            owner_id: 业务账号所有者的 Telegram ID（用于读取 per-user 设置）
-            other_name: 发消息的终端用户的脱敏名称
-            message_text: 终端用户发来的消息文本
-        Returns:
-            LLM 生成的纯文本回复
-        """
-        from stores.business_settings import get_user_settings
-        from features.business_prompt import build_system_prompt
-
-        uid = str(owner_id)
-        settings = get_user_settings(uid)
-
-        effective_base = settings.effective_api_base()
-        effective_key = settings.effective_api_key()
-        effective_model = settings.effective_model()
-        effective_provider = normalize_provider(settings.effective_provider())
-
-        http_client = httpx.AsyncClient(
-            base_url=effective_base,
-            timeout=httpx.Timeout(_RUNTIME_CONFIG.llm_timeout),
-            headers=provider_headers(effective_provider, effective_key),
+        """Business Chatbot 专用对话（实现已迁至 llm/business_llm.py）。"""
+        from llm.business_llm import business_chat
+        return await business_chat(
+            self,
+            owner_name,
+            owner_id,
+            other_name,
+            message_text,
+            context_messages=context_messages,
+            control_hint=control_hint,
         )
 
-        try:
-            custom_persona = settings.persona if settings.has_custom_persona() else ""
-            system_prompt = build_system_prompt(owner_name, custom_persona)
-
-            messages = [{"role": "system", "content": system_prompt}]
-
-            # ── 注入上下文（如果有）──
-            if context_messages:
-                context_block = get_text("llm.business_context_prefix", "下面是最近的对话历史，按时间从旧到新排列。请用它理解上下文：\n{context}").format(context="\n".join(context_messages))
-                messages.append({"role": "user", "content": context_block})
-
-            # 低侵入能力提示：只提供控制标签，不规定专用回复风格。
-            extra_blocks = []
-            if control_hint:
-                extra_blocks.append(get_text("llm.business_control_prefix", "可选输出控制：\n{control_hint}").format(control_hint=control_hint))
-            if extra_blocks:
-                messages.append({"role": "system", "content": "\n\n".join(extra_blocks)})
-
-            messages.append({"role": "user", "content": get_text("llm.business_user_template", "[来自 {other_name}] {message_text}").format(other_name=other_name, message_text=message_text)})
-
-            # Business chatbot 永远不注入禁用思考 header
-            resp = await http_client.post(
-                provider_endpoint(effective_provider),
-                json=build_request(
-                    effective_provider,
-                    model=effective_model,
-                    messages=messages,
-                    temperature=_RUNTIME_CONFIG.llm_temperature,
-                    max_tokens=_RUNTIME_CONFIG.llm_max_tokens,
-                    stream=False,
-                ),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            normalized = parse_response(effective_provider, data)
-            _record_usage_if_present(effective_model, normalized.usage_payload)
-            content = normalized.text.strip()
-
-            if len(content) > _RUNTIME_CONFIG.business_max_reply_chars:
-                content = content[:_RUNTIME_CONFIG.business_max_reply_chars] + "…"
-            return content or get_text("llm.business_empty_reply", "唔…咱暂时想不出怎么回复")
-
-        except httpx.HTTPError as e:
-            em = _safe_http_error_message(e) if isinstance(e, httpx.HTTPError) else get_text("llm.request_failed", "模型服务请求失败")
-            logger.error(f"Business LLM 调用失败 | owner={uid}: {em}")
-            return get_text("llm.business_error_with_detail", "唔…出了点问题喵（{error}）").format(error=em)
-        except Exception:
-            logger.exception(f"Business LLM 异常 | owner={uid}")
-            return get_text("llm.business_error_reply", "唔…出了点问题喵，请稍后再试")
-        finally:
-            await http_client.aclose()
 
     # ---- generate_text ----
 
@@ -974,64 +753,6 @@ class LLMClient:
             raise
 
 
-# ── 图片转文字 ──
-
-from app_config.config import CAPTION_API_BASE, CAPTION_API_KEY, CAPTION_MODEL
-
-_CAPTION_PROMPT = get_text("llm.caption_prompt", "请用中文详细描述这张图片的内容，包括人物、物体、场景、颜色等信息。必须额外识别图片中可见的文字/OCR 内容：如果有文字，请尽量原样抄录，并单独用“图片文字：...”列出；如果没有可见文字，写“图片文字：无”。")
-
-
-async def image_to_caption(image_base64: str) -> str | None:
-    if not image_base64:
-        return None
-    if not (CAPTION_API_BASE and CAPTION_API_KEY and CAPTION_MODEL):
-        logger.info("图片转文字未配置 CAPTION_API_BASE/CAPTION_API_KEY/CAPTION_MODEL，跳过")
-        return None
-    try:
-        async with httpx.AsyncClient(
-            base_url=CAPTION_API_BASE,
-            timeout=httpx.Timeout(60),
-            headers={
-                "Authorization": f"Bearer {CAPTION_API_KEY}",
-                "x-api-key": CAPTION_API_KEY,
-                "Content-Type": "application/json",
-            },
-        ) as client:
-            resp = await client.post(
-                "/chat/completions",
-                json={
-                    "model": CAPTION_MODEL,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": _CAPTION_PROMPT},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}", "detail": "auto"}},
-                            ],
-                        }
-                    ],
-                    "max_tokens": 512,
-                    "temperature": 0.3,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            _record_usage_if_present(CAPTION_MODEL, data)
-            desc = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-            if desc:
-                logger.info(f"📝 图片转文字成功 ({len(desc)} 字符): {desc[:80]}...")
-                return desc
-            logger.warning("图片转文字返回空内容")
-            return None
-    except httpx.HTTPStatusError as e:
-        body = e.response.text[:500] if e.response else ""
-        logger.warning(f"图片转文字 HTTP {e.response.status_code}: {body}")
-        return None
-    except Exception as e:
-        logger.warning(f"图片转文字失败: {e}")
-        return None
-
-
 # ── 全局单例 ──
 
 _llm_client: Optional[LLMClient] = None
@@ -1049,14 +770,6 @@ async def close_llm_client():
     if _llm_client:
         await _llm_client.close()
         _llm_client = None
-
-
-def get_runtime_config() -> RuntimeConfig:
-    return _RUNTIME_CONFIG
-
-
-def switch_active_model(model_name: str) -> str:
-    return set_active_model(model_name)
 
 
 def get_active_llm_model() -> str:

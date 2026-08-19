@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import app_config.config as legacy_config
 from stores.group_settings_store import (
@@ -28,7 +27,6 @@ from stores.group_settings_store import (
     get_group_username_anonymization_enabled,
 )
 from stores.model_store import get_active_model
-from app_config.settings import load_settings
 
 
 @dataclass(frozen=True)
@@ -48,9 +46,6 @@ class EffectiveImageGenConfig:
 
 class RuntimeConfig:
     """统一的运行时配置访问入口。"""
-
-    def __init__(self, settings: Any):
-        self.settings = settings
 
     # ---- app/global ----
     @property
@@ -223,6 +218,6 @@ def get_shared_runtime_config() -> RuntimeConfig:
     """Return the process-wide runtime configuration facade."""
     global _SHARED_RUNTIME_CONFIG
     if _SHARED_RUNTIME_CONFIG is None:
-        _SHARED_RUNTIME_CONFIG = RuntimeConfig(load_settings())
+        _SHARED_RUNTIME_CONFIG = RuntimeConfig()
     return _SHARED_RUNTIME_CONFIG
 

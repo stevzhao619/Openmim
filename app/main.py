@@ -38,8 +38,8 @@ from integrations.scheduler_tool import (
     cancel_all_tasks,
 )
 from stores.group_settings_store import get_group_settings
-from handlers.playables import send_greeting
-from features.playables import stop_prepare_guess_task
+from features.playables import send_greeting
+from features.history_guess import stop_prepare_guess_task
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

@@ -14,14 +14,14 @@ from stores.context_manager import ContextManager, ContextMessage
 async def test_business_messages_for_same_peer_are_serialized(monkeypatch):
     monkeypatch.setattr(business, "BUSINESS_ENABLED", True)
     business._active_connections.clear()
-    business._business_session_locks.clear()
+    business._session_lock._locks.clear()
     business._cache_active_connection("conn", 10)
 
     active = 0
     max_active = 0
     call_order = []
 
-    async def fake_unlocked(update, context):
+    async def fake_unlocked(update, context, **kwargs):
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
@@ -49,7 +49,7 @@ async def test_business_messages_for_same_peer_are_serialized(monkeypatch):
 
     assert max_active == 1
     assert call_order == [("start", 1), ("end", 1), ("start", 2), ("end", 2)]
-    assert business._business_session_locks == {}
+    assert business._session_lock._locks == {}
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import json
 import os
 import asyncio
 import logging
+from dataclasses import asdict, dataclass, field
 
 from sqlalchemy import delete, distinct, func, select, update
 
@@ -18,62 +19,36 @@ CONTEXT_STORE_FILE = os.path.join(DATA_DIR, "context_history.sqlite3")
 LEGACY_CONTEXT_STORE_FILE = os.path.join(DATA_DIR, "context_history.json")
 
 
+@dataclass(slots=True)
 class ContextMessage:
     """单条上下文消息"""
 
-    __slots__ = ("sender_name", "text", "message_type", "is_reply_to_bot", "is_mention", "caption", "emoji", "char_count", "image_file_ids", "user_id", "username", "message_id", "reply_to_message_id", "file_id", "file_name")
+    sender_name: str
+    text: str = ""
+    message_type: str = "text"
+    is_reply_to_bot: bool = False
+    is_mention: bool = False
+    caption: str = ""
+    emoji: str = ""
+    image_file_ids: list[str] = field(default_factory=list)
+    user_id: int | None = None
+    username: str = ""
+    message_id: int | None = None
+    reply_to_message_id: int | None = None
+    file_id: str = ""
+    file_name: str = ""
+    char_count: int = field(default=0, init=False)
 
-    def __init__(
-        self,
-        sender_name: str,
-        text: str = "",
-        message_type: str = "text",
-        is_reply_to_bot: bool = False,
-        is_mention: bool = False,
-        caption: str = "",
-        emoji: str = "",
-        image_file_ids: list[str] | None = None,
-        user_id: int | None = None,
-        username: str = "",
-        message_id: int | None = None,
-        reply_to_message_id: int | None = None,
-        file_id: str = "",
-        file_name: str = "",
-    ):
-        self.sender_name = sender_name
-        self.text = text
-        self.message_type = message_type
-        self.is_reply_to_bot = is_reply_to_bot
-        self.is_mention = is_mention
-        self.caption = caption
-        self.emoji = emoji
-        self.image_file_ids = image_file_ids or []
-        self.user_id = user_id
-        self.username = username or ""
-        self.message_id = message_id
-        self.reply_to_message_id = reply_to_message_id
-        self.char_count = len(text or caption or emoji or "")
-        self.file_id = file_id or ""
-        self.file_name = file_name or ""
+    def __post_init__(self):
+        self.image_file_ids = list(self.image_file_ids or [])
+        self.username = self.username or ""
+        self.file_id = self.file_id or ""
+        self.file_name = self.file_name or ""
+        if not self.char_count:
+            self.char_count = len(self.text or self.caption or self.emoji or "")
 
     def to_dict(self) -> dict:
-        return {
-            "sender_name": self.sender_name,
-            "text": self.text,
-            "message_type": self.message_type,
-            "is_reply_to_bot": self.is_reply_to_bot,
-            "is_mention": self.is_mention,
-            "caption": self.caption,
-            "emoji": self.emoji,
-            "char_count": self.char_count,
-            "image_file_ids": self.image_file_ids,
-            "user_id": self.user_id,
-            "username": self.username,
-            "message_id": self.message_id,
-            "reply_to_message_id": self.reply_to_message_id,
-            "file_id": self.file_id,
-            "file_name": self.file_name,
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ContextMessage":

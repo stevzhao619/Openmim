@@ -9,7 +9,7 @@
 """
 import logging
 
-from app_config.customization import get_dict, get_text
+from app_config.customization import get_text
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,8 +17,7 @@ from telegram.ext import (
     ChatMemberHandler, filters,
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError, BadRequest
-from telegram.helpers import escape_markdown
+from telegram.error import TelegramError
 
 from app_config.config import (
     ADMIN_IDS,
@@ -29,8 +28,6 @@ from stores.group_settings_store import (
     set_group_setting,
     reset_group_setting,
     reset_group_settings,
-    get_setting_labels,
-    get_setting_descriptions,
     SETTING_IS_SENSITIVE,
     mask_sensitive,
     get_group_attention_mode,
@@ -59,67 +56,21 @@ from stores.business_settings import (
     set_user_setting as set_biz_setting,
     reset_user_setting as reset_biz_setting,
 )
-
-def _admin_examples() -> dict[str, str]:
-    return get_dict("admin_examples", {})
-
-
-def _labels() -> dict[str, str]:
-    return get_setting_labels()
-
-
-def _descriptions() -> dict[str, str]:
-    return get_setting_descriptions()
+from handlers.admin_panel_utils import (
+    admin_examples as _admin_examples,
+    labels as _labels,
+    descriptions as _descriptions,
+    mdv2 as _mdv2,
+    safe_edit as _safe_edit,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-def _mdv2(text: str) -> str:
-    """Convert the panel's small legacy-Markdown subset (**bold**, `code`) to MarkdownV2."""
-    s = str(text or "")
-    out: list[str] = []
-    i = 0
-    while i < len(s):
-        if s.startswith("**", i):
-            j = s.find("**", i + 2)
-            if j != -1:
-                out.append("*" + escape_markdown(s[i + 2:j], version=2) + "*")
-                i = j + 2
-                continue
-        if s[i] == "`":
-            j = s.find("`", i + 1)
-            if j != -1:
-                out.append("`" + escape_markdown(s[i + 1:j], version=2, entity_type="code") + "`")
-                i = j + 1
-                continue
-        out.append(escape_markdown(s[i], version=2))
-        i += 1
-    return "".join(out)
-
-
 def _attention_label(mode: str) -> str:
     # 面板侧统一只展示单消息注意力，避免暴露已下线模式。
     return "单消息注意力"
-
-# ── 安全编辑 ─────────────────────────────────────
-
-async def _safe_edit(query, text=None, reply_markup=None, parse_mode=None):
-    try:
-        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
-        msg = str(e).lower()
-        if "not modified" in msg:
-            return
-        if parse_mode is not None and "can't parse entities" in msg:
-            try:
-                await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=None)
-                return
-            except TelegramError:
-                pass
-        raise
-    except TelegramError:
-        pass
 
 # ── Callback 前缀 ─────────────────────────────────
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict, dataclass
 from threading import Lock
 
 from app.runtime_config import get_shared_runtime_config
@@ -43,48 +44,23 @@ def _save(data: dict) -> None:
     os.replace(tmp, SETTINGS_PATH)
 
 
+@dataclass(slots=True)
 class BusinessUserSettings:
     """单个用户的 Business 设置。"""
 
-    __slots__ = ("llm_provider", "llm_api_key", "llm_api_base", "llm_model", "persona", "persona_file_name", "mode", "aphasia_enabled", "sticker_enabled", "multi_message_enabled")
-
-    def __init__(
-        self,
-        llm_provider: str = "",
-        llm_api_key: str = "",
-        llm_api_base: str = "",
-        llm_model: str = "",
-        persona: str = "",
-        persona_file_name: str = "",
-        mode: str = "chat",
-        aphasia_enabled: str = "false",
-        sticker_enabled: str = "false",
-        multi_message_enabled: str = "true",
-    ):
-        self.llm_provider = llm_provider
-        self.llm_api_key = llm_api_key
-        self.llm_api_base = llm_api_base
-        self.llm_model = llm_model
-        self.persona = persona
-        self.persona_file_name = persona_file_name
-        self.mode = mode  # "chat" | "synonym"
-        self.aphasia_enabled = aphasia_enabled  # "true" | "false"
-        self.sticker_enabled = sticker_enabled
-        self.multi_message_enabled = multi_message_enabled
+    llm_provider: str = ""
+    llm_api_key: str = ""
+    llm_api_base: str = ""
+    llm_model: str = ""
+    persona: str = ""
+    persona_file_name: str = ""
+    mode: str = "chat"  # "chat" | "synonym"
+    aphasia_enabled: str = "false"  # "true" | "false"
+    sticker_enabled: str = "false"
+    multi_message_enabled: str = "true"
 
     def to_dict(self) -> dict:
-        return {
-            "llm_provider": self.llm_provider,
-            "llm_api_key": self.llm_api_key,
-            "llm_api_base": self.llm_api_base,
-            "llm_model": self.llm_model,
-            "persona": self.persona,
-            "persona_file_name": self.persona_file_name,
-            "mode": self.mode,
-            "aphasia_enabled": self.aphasia_enabled,
-            "sticker_enabled": self.sticker_enabled,
-            "multi_message_enabled": self.multi_message_enabled,
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> BusinessUserSettings:

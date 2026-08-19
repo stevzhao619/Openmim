@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -30,6 +30,7 @@ from stores.memory_store import (
 from stores.group_settings_store import get_group_username_anonymization_enabled
 
 from stores.orm import runtime_sql_connection
+from stores.timestamps import cst_now_iso
 from app_config.config import (
     DATA_DIR,
     WORKSPACE_DIR,
@@ -105,9 +106,6 @@ def _mask_text_for_prompt(text: str, refs: list[PersonaUserRef], chat_id: int) -
                 masked = masked.replace(raw, label)
     return masked
 
-def _now() -> str:
-    return datetime.now(timezone(timedelta(hours=8))).isoformat()
-
 
 def _connect():
     return runtime_sql_connection(DB_PATH)
@@ -179,7 +177,7 @@ def upsert_known_user(chat_id: int, user_id: int | None, display_name: str = "",
     if display_name.startswith("用户_") and (anon_label == display_name or not anon_label):
         display_name = ""
 
-    now = _now()
+    now = cst_now_iso()
     with _connect() as conn:
         conn.execute(
             """
@@ -223,7 +221,7 @@ def _migrate_chat_persona_to_global() -> None:
                     patch = patch if isinstance(patch, dict) else {}
                 except Exception:
                     patch = {}
-                item = by_user.setdefault(uid, {"persona": {}, "display_name": "", "username": "", "created_at": row["created_at"] or row["updated_at"] or _now(), "updated_at": row["updated_at"] or _now()})
+                item = by_user.setdefault(uid, {"persona": {}, "display_name": "", "username": "", "created_at": row["created_at"] or row["updated_at"] or cst_now_iso(), "updated_at": row["updated_at"] or cst_now_iso()})
                 item["persona"] = merge_persona(item["persona"], patch)
                 if row["display_name"]:
                     item["display_name"] = row["display_name"]
@@ -259,7 +257,7 @@ def _migrate_chat_persona_to_global() -> None:
                         persona_json=excluded.persona_json,
                         updated_at=excluded.updated_at
                     """,
-                    (uid, display_name or "", username or "", json.dumps(persona, ensure_ascii=False, separators=(",", ":")), item["updated_at"] or _now(), created_at or _now()),
+                    (uid, display_name or "", username or "", json.dumps(persona, ensure_ascii=False, separators=(",", ":")), item["updated_at"] or cst_now_iso(), created_at or cst_now_iso()),
                 )
             conn.commit()
     except Exception:
@@ -286,7 +284,7 @@ def save_global_persona(ref: PersonaUserRef, persona: dict[str, Any]) -> None:
     persona = compact_persona(persona)
     if _empty_persona(persona):
         return
-    now = _now()
+    now = cst_now_iso()
     raw = json.dumps(persona, ensure_ascii=False, separators=(",", ":"))
     username = (ref.username or "").lstrip("@").strip()
     with _connect() as conn:
@@ -456,7 +454,7 @@ def save_persona(chat_id: int, ref: PersonaUserRef, persona: dict[str, Any]) -> 
     if _empty_persona(persona):
         return
     save_global_persona(ref, persona)
-    now = _now()
+    now = cst_now_iso()
     raw = json.dumps(persona, ensure_ascii=False, separators=(",", ":"))
     with _connect() as conn:
         conn.execute(
